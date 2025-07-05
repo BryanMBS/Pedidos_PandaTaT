@@ -1,129 +1,147 @@
-# Importando FastAPI y el cursor de la base de datos
-from fastapi import FastAPI
+# main.py
+# API RESTful para ser consumida por un frontend.
+
+from fastapi import FastAPI, HTTPException
+from typing import List
 from database import cleverCursor
+from models import Usuario, Pedido, LoginData # Importamos los modelos Pydantic
 
-# app = FastAPI() para crear la instancia de FastAPI
-app = FastAPI()
+app = FastAPI(
+    title="PandaTaT API",
+    description="API para la gestión de usuarios y pedidos del sistema PandaTaT.",
+    version="1.0.0"
+)
+
+# --- Funciones Auxiliares para Mapeo de Datos ---
+# Estas funciones convierten los resultados de la base de datos (tuplas) a diccionarios
+# para que FastAPI pueda convertirlos a JSON usando los modelos Pydantic.
+
+def map_to_pedido(record):
+    if not record:
+        return None
+    return {
+        "id_pedido": record[0],
+        "fecha_pedido": record[1],
+        "monto_total": record[2],
+        "estado": record[3],
+        "cliente": record[4],
+        "vendedor": record[5] if record[5] else "N/A"
+    }
 
 #---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos
-@app.get("/Pedidos totales")
-def get_pedidos():
-    cleverCursor.execute("SELECT * FROM Pedidos")
-    pedidos = cleverCursor.fetchall()
-    return {"pedidos": pedidos}
+# ENDPOINT DE AUTENTICACIÓN
 #---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos enviados
-@app.get("/Pedidos Enviados")
-def get_pedidos_enviados():
-    cleverCursor.execute("SELECT * FROM Pedidos WHERE id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Enviado')")
-    pedidos_enviados = cleverCursor.fetchall()
-    return {"pedidos_enviados": pedidos_enviados}
+
+@app.post("/login", response_model=Usuario, tags=["Autenticación"])
+def login(login_data: LoginData):
+    """
+    Verifica las credenciales de un usuario y, si son correctas,
+    devuelve los datos del usuario en formato JSON.
+    """
+    query = """
+        SELECT u.id_usuario, u.nombre, u.apellido, u.email, r.nombre_rol
+        FROM Usuarios u
+        JOIN Roles r ON u.id_rol = r.id_rol
+        WHERE u.email = %s AND u.contrasena = %s
+    """
+    cleverCursor.execute(query, (login_data.email, login_data.contrasena))
+    user_record = cleverCursor.fetchone()
+
+    if not user_record:
+        raise HTTPException(status_code=401, detail="Correo o contraseña incorrectos")
+
+    return {
+        "id_usuario": user_record[0],
+        "nombre": user_record[1],
+        "apellido": user_record[2],
+        "email": user_record[3],
+        "rol": user_record[4]
+    }
+
 #---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos pagados
-@app.get("/Pedidos Pagados")
-def get_pedidos_pagados():
-    cleverCursor.execute("SELECT * FROM Pedidos WHERE id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Pagado')")
-    pedidos_pagados = cleverCursor.fetchall()
-    return {"pedidos_pagados": pedidos_pagados}
+# ENDPOINTS DE PEDIDOS
 #---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos cancelados
-@app.get("/Pedidos Cancelados")
-def get_pedidos_cancelados():
-    cleverCursor.execute("SELECT * FROM Pedidos WHERE id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Cancelado')")
-    pedidos_cancelados = cleverCursor.fetchall()
-    return {"pedidos_cancelados": pedidos_cancelados}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos reenviados
-@app.get("/Pedidos Reenviados")
-def get_pedidos_reenviados():
-    cleverCursor.execute("SELECT * FROM Pedidos WHERE id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Reenviado')")
-    pedidos_reenviados = cleverCursor.fetchall()
-    return {"pedidos_reenviados": pedidos_reenviados}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos por vendedor
-@app.get("/Pedidos Pagados por Vendedor")
-def get_pedidos_pagados_por_vendedor():
-    cleverCursor.execute("""
-        SELECT p.*, u.nombre, u.apellido 
+
+@app.get("/pedidos", response_model=List[Pedido], tags=["Pedidos"])
+def get_todos_los_pedidos():
+    """
+    Devuelve una lista de todos los pedidos en el sistema.
+    Ideal para un dashboard de administrador.
+    """
+    query = """
+        SELECT p.id_pedido, p.fecha_pedido, p.monto_total, e.nombre_estado,
+               CONCAT(c.nombre, ' ', c.apellido) AS cliente,
+               CONCAT(v.nombre, ' ', v.apellido) AS vendedor
         FROM Pedidos p
-        JOIN Usuarios u ON p.id_usuario_vendedor = u.id_usuario
-        WHERE p.id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Pagado')
-    """)
-    pedidos_pagados_vendedor = cleverCursor.fetchall()
-    return {"pedidos_pagados_vendedor": pedidos_pagados_vendedor}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos enviados por vendedor
-@app.get("/Pedidos Enviados por Vendedor")
-def get_pedidos_enviados_por_vendedor():
-    cleverCursor.execute("""
-        SELECT p.*, u.nombre, u.apellido 
+        JOIN Estado_pedidos e ON p.id_estado = e.id_estado
+        JOIN Usuarios c ON p.id_usuario_cliente = c.id_usuario
+        LEFT JOIN Usuarios v ON p.id_usuario_vendedor = v.id_usuario
+        ORDER BY p.id_pedido
+    """
+    cleverCursor.execute(query)
+    pedidos_records = cleverCursor.fetchall()
+    
+    # Mapeamos cada registro a un diccionario antes de devolverlo
+    return [map_to_pedido(p) for p in pedidos_records]
+
+@app.get("/usuarios/{usuario_id}/pedidos", response_model=List[Pedido], tags=["Pedidos"])
+def get_pedidos_por_usuario(usuario_id: int):
+    """
+    Devuelve el historial de pedidos de un usuario específico (cliente).
+    Un frontend llamaría a este endpoint después de que un cliente inicie sesión.
+    """
+    # Primero verificamos si el usuario existe para dar un mejor feedback
+    cleverCursor.execute("SELECT id_usuario FROM Usuarios WHERE id_usuario = %s", (usuario_id,))
+    if not cleverCursor.fetchone():
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    query = """
+        SELECT p.id_pedido, p.fecha_pedido, p.monto_total, e.nombre_estado,
+               CONCAT(c.nombre, ' ', c.apellido) AS cliente,
+               CONCAT(v.nombre, ' ', v.apellido) AS vendedor
         FROM Pedidos p
-        JOIN Usuarios u ON p.id_usuario_vendedor = u.id_usuario
-        WHERE p.id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Enviado')
-    """)
-    pedidos_enviados_vendedor = cleverCursor.fetchall()
-    return {"pedidos_enviados_vendedor": pedidos_enviados_vendedor}
+        JOIN Estado_pedidos e ON p.id_estado = e.id_estado
+        JOIN Usuarios c ON p.id_usuario_cliente = c.id_usuario
+        LEFT JOIN Usuarios v ON p.id_usuario_vendedor = v.id_usuario
+        WHERE p.id_usuario_cliente = %s
+        ORDER BY p.fecha_pedido DESC
+    """
+    cleverCursor.execute(query, (usuario_id,))
+    pedidos_records = cleverCursor.fetchall()
+    
+    return [map_to_pedido(p) for p in pedidos_records]
+
 #---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos cancelados por vendedor
-@app.get("/Pedidos Cancelados por Vendedor")
-def get_pedidos_cancelados_por_vendedor():
-    cleverCursor.execute("""
-        SELECT p.*, u.nombre, u.apellido 
-        FROM Pedidos p
-        JOIN Usuarios u ON p.id_usuario_vendedor = u.id_usuario
-        WHERE p.id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Cancelado')
-    """)
-    pedidos_cancelados_vendedor = cleverCursor.fetchall()
-    return {"pedidos_cancelados_vendedor": pedidos_cancelados_vendedor}
+# ENDPOINTS DE USUARIOS
 #---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos reenviados por vendedor
-@app.get("/Pedidos Reenviados por Vendedor")
-def get_pedidos_reenviados_por_vendedor():
-    cleverCursor.execute("""
-        SELECT p.*, u.nombre, u.apellido 
-        FROM Pedidos p
-        JOIN Usuarios u ON p.id_usuario_vendedor = u.id_usuario
-        WHERE p.id_estado = (SELECT id_estado FROM Estado_pedidos WHERE nombre_estado = 'Reenviado')
-    """)
-    pedidos_reenviados_vendedor = cleverCursor.fetchall()
-    return {"pedidos_reenviados_vendedor": pedidos_reenviados_vendedor}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos por cliente
-@app.get("/Pedidos por Cliente")
-def get_pedidos_por_cliente():
-    cleverCursor.execute("""
-        SELECT p.*, u.nombre, u.apellido 
-        FROM Pedidos p
-        JOIN Usuarios u ON p.id_usuario_cliente = u.id_usuario
-    """)
-    pedidos_por_cliente = cleverCursor.fetchall()
-    return {"pedidos_por_cliente": pedidos_por_cliente}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de pedidos por estado
-@app.get("/usuarios admin")
-def get_admin_users():
-    cleverCursor.execute("SELECT * FROM Usuarios WHERE id_rol = (SELECT id_rol FROM Roles WHERE nombre_rol = 'Administrador')")
-    admin_users = cleverCursor.fetchall()
-    return {"admin_users": admin_users}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de usuarios por rol
-@app.get("/usuarios vendedor")
-def get_vendedor_users():
-    cleverCursor.execute("SELECT * FROM Usuarios WHERE id_rol = (SELECT id_rol FROM Roles WHERE nombre_rol = 'Vendedor')")
-    vendedor_users = cleverCursor.fetchall()
-    return {"vendedor_users": vendedor_users}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de usuarios por rol
-@app.get("/cliente")
-def get_cliente_users():
-    cleverCursor.execute("SELECT * FROM Usuarios WHERE id_rol = (SELECT id_rol FROM Roles WHERE nombre_rol = 'Cliente')")
-    cliente_users = cleverCursor.fetchall()
-    return {"cliente_users": cliente_users}
-#---------------------------------------------------------------------------
-# endpoint que genera la lista de gerentes de zona
-@app.get("/gerentes de zona")
-def get_gerentes_de_zona():
-    cleverCursor.execute("SELECT * FROM Usuarios WHERE id_rol = (SELECT id_rol FROM Roles WHERE nombre_rol = 'Gerente de Zona')")
-    gerentes_de_zona = cleverCursor.fetchall()
-    return {"gerentes_de_zona": gerentes_de_zona}
+
+@app.get("/usuarios", response_model=List[Usuario], tags=["Usuarios"])
+def get_usuarios_por_rol(rol: str):
+    """
+    Devuelve una lista de usuarios filtrados por rol.
+    Ejemplo de uso en frontend: /usuarios?rol=Vendedor
+    """
+    # Validamos que el rol exista para evitar inyección SQL o errores
+    cleverCursor.execute("SELECT nombre_rol FROM Roles WHERE nombre_rol = %s", (rol,))
+    if not cleverCursor.fetchone():
+        raise HTTPException(status_code=400, detail=f"El rol '{rol}' no es válido.")
+
+    query = """
+        SELECT u.id_usuario, u.nombre, u.apellido, u.email, r.nombre_rol
+        FROM Usuarios u
+        JOIN Roles r ON u.id_rol = r.id_rol
+        WHERE r.nombre_rol = %s
+    """
+    cleverCursor.execute(query, (rol,))
+    user_records = cleverCursor.fetchall()
+
+    if not user_records:
+        raise HTTPException(status_code=404, detail=f"No se encontraron usuarios con el rol '{rol}'")
+
+    # Mapeamos cada registro a la estructura del modelo Pydantic
+    return [
+        {
+            "id_usuario": u[0], "nombre": u[1], "apellido": u[2], 
+            "email": u[3], "rol": u[4]
+        } for u in user_records
+    ]
